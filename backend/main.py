@@ -2,19 +2,11 @@ from fastapi import FastAPI, File, UploadFile, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import io
-import torch
-from torchvision import models, transforms
+import requests
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import datetime
-import os
-import torch
-
-# Force PyTorch to single-thread CPU mode to prevent RAM spikes on Render
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-torch.set_num_threads(1)
 
 # --- 1. Database Setup (SQLite) ---
 DATABASE_URL = "sqlite:///./meals.db"
@@ -34,18 +26,18 @@ class MealLog(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- 2. FastAPI Application & CORS Configuration ---
+# --- 2. FastAPI Application & CORS ---
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite React default port
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- 3. Expanded Nutrition Database & Dynamic Generator ---
+# --- 3. Nutrition DB & Dynamic Macros ---
 NUTRITION_DB = {
     "pizza": {"calories": 285, "protein": 12.0, "carbs": 36.0, "fat": 10.0},
     "burger": {"calories": 350, "protein": 20.0, "carbs": 32.0, "fat": 15.0},
@@ -54,18 +46,9 @@ NUTRITION_DB = {
     "apple": {"calories": 95, "protein": 0.5, "carbs": 25.0, "fat": 0.3},
     "guacamole": {"calories": 160, "protein": 2.0, "carbs": 9.0, "fat": 15.0},
     "plate": {"calories": 210, "protein": 8.0, "carbs": 20.0, "fat": 10.0},
-    "soup": {"calories": 130, "protein": 6.0, "carbs": 15.0, "fat": 4.0},
-    "hotdog": {"calories": 290, "protein": 10.0, "carbs": 24.0, "fat": 16.0},
-    "french fries": {"calories": 365, "protein": 4.0, "carbs": 48.0, "fat": 17.0},
-    "bagel": {"calories": 250, "protein": 10.0, "carbs": 48.0, "fat": 1.5},
-    "pretzel": {"calories": 380, "protein": 9.0, "carbs": 80.0, "fat": 3.0},
-    "orange": {"calories": 62, "protein": 1.2, "carbs": 15.0, "fat": 0.2},
-    "banana": {"calories": 105, "protein": 1.3, "carbs": 27.0, "fat": 0.3},
-    "ice cream": {"calories": 207, "protein": 3.5, "carbs": 24.0, "fat": 11.0},
 }
 
 def generate_dynamic_macros(food_name: str):
-    """Generates unique, deterministic macros for unmatched food items using hashing."""
     hash_val = sum(ord(c) for c in food_name)
     return {
         "calories": 150 + (hash_val % 250),
@@ -74,12 +57,6 @@ def generate_dynamic_macros(food_name: str):
         "fat": round(2.0 + (hash_val % 16), 1),
     }
 
-# --- 4. ML Model Initialization ---
-weights = models.ResNet18_Weights.DEFAULT
-model = models.resnet18(weights=weights)
-model.eval()
-preprocess = weights.transforms()
-
 def get_db():
     db = SessionLocal()
     try:
@@ -87,33 +64,43 @@ def get_db():
     finally:
         db.close()
 
-# --- 5. API Endpoints ---
+# --- 4. Free Serverless Food Classifier Call ---
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/nateraw/food"
+
+@app.get("/")
+def root():
+    return {"message": "Food Macro API is Live & Healthy!"}
+
 @app.post("/api/analyze-food")
 async def analyze_food(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
 
-    # Read and preprocess image
     image_bytes = await file.read()
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    input_tensor = preprocess(image).unsqueeze(0)
-
-    # Perform ML Inference
-    with torch.no_grad():
-        output = model(input_tensor)
-        predicted_idx = torch.argmax(output, dim=1).item()
-
-    # Get class name from ImageNet weights
-    category_name = weights.meta["categories"][predicted_idx].lower()
     
-    # Check for match in NUTRITION_DB
+    # Query Hugging Face Serverless Food Classifier
+    try:
+        response = requests.post(
+            HF_API_URL,
+            headers={"Content-Type": "application/octet-stream"},
+            data=image_bytes,
+            timeout=10
+        )
+        data = response.json()
+        if isinstance(data, list) and len(data) > 0:
+            category_name = data[0].get("label", "food").lower()
+        else:
+            category_name = "food"
+    except Exception:
+        category_name = "plate"
+
+    # Match to Nutrition DB or generate dynamic macros
     matched_key = None
     for key in NUTRITION_DB.keys():
         if key in category_name:
             matched_key = key
             break
 
-    # Assign macros from DB if found, otherwise compute unique dynamic macros
     if matched_key:
         macros = NUTRITION_DB[matched_key]
         display_name = matched_key.title()
@@ -121,7 +108,7 @@ async def analyze_food(file: UploadFile = File(...), db: Session = Depends(get_d
         display_name = category_name.split(',')[0].title()
         macros = generate_dynamic_macros(display_name)
 
-    # Save transaction to SQLite Database
+    # Save to Database
     db_meal = MealLog(
         detected_food=display_name,
         calories=macros["calories"],
@@ -139,7 +126,6 @@ async def analyze_food(file: UploadFile = File(...), db: Session = Depends(get_d
         "macros": macros,
         "created_at": db_meal.created_at.isoformat()
     }
-
 
 @app.get("/api/meal-history")
 def get_meal_history(db: Session = Depends(get_db)):
