@@ -8,6 +8,13 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import datetime
+import os
+import torch
+
+# Force PyTorch to single-thread CPU mode to prevent RAM spikes on Render
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+torch.set_num_threads(1)
 
 # --- 1. Database Setup (SQLite) ---
 DATABASE_URL = "sqlite:///./meals.db"
@@ -132,6 +139,7 @@ async def analyze_food(file: UploadFile = File(...), db: Session = Depends(get_d
         "macros": macros,
         "created_at": db_meal.created_at.isoformat()
     }
+
 
 @app.get("/api/meal-history")
 def get_meal_history(db: Session = Depends(get_db)):
