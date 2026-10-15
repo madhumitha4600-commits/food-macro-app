@@ -7,16 +7,16 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState([]);
 
-  // Fetch meal history on initial load
+  // Fetch meal history on initial page load
   useEffect(() => {
     fetchHistory();
   }, []);
 
   const fetchHistory = async () => {
     try {
-      const response = await fetch("https://food-macro-app.onrender.com/api/meal-history");
-      if (response.ok) {
-        const data = await response.json();
+      const historyResponse = await fetch("https://food-macro-app.onrender.com/api/meal-history");
+      if (historyResponse.ok) {
+        const data = await historyResponse.json();
         setHistory(data);
       }
     } catch (err) {
@@ -41,16 +41,16 @@ export default function App() {
     formData.append("file", selectedFile);
 
     try {
-      const response = await fetch("https://food-macro-app.onrender.com/api/analyze-food", {
+      const analyzeResponse = await fetch("https://food-macro-app.onrender.com/api/analyze-food", {
         method: "POST",
         body: formData,
       });
 
-      if (!response.ok) throw new Error("Analysis failed");
+      if (!analyzeResponse.ok) throw new Error("Analysis failed");
 
-      const data = await response.json();
+      const data = await analyzeResponse.json();
       setCurrentResult(data);
-      fetchHistory(); // Sync history log table with DB
+      fetchHistory(); // Refresh table from DB
     } catch (err) {
       console.error("Upload error:", err);
     } finally {
